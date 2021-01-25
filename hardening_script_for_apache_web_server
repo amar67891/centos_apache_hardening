@@ -1,0 +1,87 @@
+#!/bin/bash
+# this script for hardening a fresh centos 7 server after installing the apache and MYSQL
+
+#updating the system
+yum -y update
+yum -y install wget
+yum -y install vim 
+# Disabling SElinux 
+setenforce 0
+sed -i 's/^SELINUX=.*/SELINUX=disabled/g' /etc/sysconfig/selinux && cat /etc/sysconfig/selinux
+# First we have to configure the Firewall rules 
+systemctl start firewalld.service 
+firewall-cmd --permanent --zone=public --add-service=http 
+firewall-cmd --permanent --zone=public --add-service=ftp
+firewall-cmd --permanent --zone=public --add-service=https
+firewall-cmd --permanent --zone=public --add-port=22000/tcp
+firewall-cmd --permanent --zone=public --add-port=3306/tcp
+firewall-cmd --reload
+
+# we will start with the ssh hardening 
+useradd amar6789
+passwd amar6789
+usermod -aG wheel amar6789
+sed -i 's/Port 22/Port 22000/g' /etc/ssh/sshd_config
+sed -i 's/#PermitRootLogin yes/PermitRootLogin no/g' /etc/ssh/sshd_config
+echo "Banner /etc/issue.net" >> /etc/ssh/sshd_config
+echo "THIS IS PRIVATE DEVICE 
+ALL CONNECTIONS ARE MONITORED AND RECORDED
+IF YOU ARE NOT AUTHORIZED PLEASE LOG OUT!!!" > /etc/issue.net
+systemctl restart sshd.service
+echo " YOU HAVE LOGGED TO Private DEVICE 
+IF YOU ARE NOT AUTHORIZED LOG OUT IMMEDATLY " > /etc/motd
+
+#configuring fail2ban to protect against brute force 
+yum -y install epel-release
+yum -y  install fail2ban fail2ban-systemd
+touch /etc/fail2ban/jail.d/sshd.local
+echo "
+[sshd]
+enabled = true
+port = 22000
+logpath = %(sshd_log)s
+maxretry = 3
+bantime = 86400 " > /etc/fail2ban/jail.d/sshd.local
+systemctl enable fail2ban
+systemctl start fail2ban
+
+#hardening the Apache server 
+echo "ServerTokens Prod
+ServerSignature Off
+TraceEnable off" >> /etc/httpd/conf/httpd.conf
+
+# time for the WAF 
+yum -y update
+yum -y install gcc make httpd-devel libxml2 pcre-devel libxml2-devel curl-devel git
+cd /opt/
+wget https://www.modsecurity.org/tarball/2.9.1/modsecurity-2.9.1.tar.gz
+tar xzfv modsecurity-2.9.1.tar.gz
+cd modsecurity-2.9.1
+./configure
+make install
+cp modsecurity.conf-recommended /etc/httpd/conf.d/modsecurity.conf
+cp unicode.mapping /etc/httpd/conf.d/
+echo "
+LoadModule security2_module modules/mod_security2.so
+LoadModule unique_id_module modules/mod_unique_id.so" >> /etc/httpd/conf/httpd.conf
+systemctl restart httpd.service
+systemctl status httpd.service
+systemctl enable httpd.service
+cd /etc/httpd
+git clone https://github.com/SpiderLabs/owasp-modsecurity-crs.git
+mv owasp-modsecurity-crs modsecurity-crs
+cd modsecurity-crs
+cp crs-setup.conf.example crs-config.conf
+echo "
+LoadModule security2_module modules/mod_security2.so
+LoadModule unique_id_module modules/mod_unique_id.so" >> /etc/httpd/conf/httpd.conf 
+systemctl restart httpd.service
+yum  -y install epel-release
+wget https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm sudo rpm -Uvh epel-release-7*.rpm
+yum -y install rkhunter
+rkhunter --update
+rkhunter -c
+yum -y install aide
+/usr/sbin/aide --init
+cp /var/lib/aide/aide.db.new.gz /var/lib/aide/aide.db.gz
+/usr/sbin/aide --check
